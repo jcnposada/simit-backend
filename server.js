@@ -11,36 +11,57 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
   let browser;
 
   try {
-    // Iniciar Puppeteer con flags obligatorias para servidores en la nube
+    // Iniciar Puppeteer optimizado para servidores gratuitos
     browser = await puppeteer.launch({
       headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--single-process'
+        '--disable-gpu'
       ]
     });
 
     const page = await browser.newPage();
-    
-    // Navegar al SIMIT
-    await page.goto(`https://www.fcm.org.co/simit/#/estado-cuenta?txtDocumento=${cedula}`, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
+
+    // Configurar un User-Agent real para evitar bloqueos por seguridad
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    // Navegar al SIMIT con tolerancia de carga
+    await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
     });
 
-    // Esperar la carga de la tabla
-    await page.waitForTimeout(4000);
+    // Esperar a que aparezca el campo de texto de búsqueda de la cédula
+    await page.waitForSelector('input', { timeout: 15000 });
 
-    // Extraer registros del DOM
+    // Escribir la cédula o placa en el input del SIMIT
+    const inputSelector = 'input'; // Selector general del buscador
+    await page.click(inputSelector);
+    await page.keyboard.type(cedula, { delay: 50 });
+
+    // Presionar la tecla Enter o buscar el botón de la lupa para ejecutar la consulta
+    await page.keyboard.press('Enter');
+
+    // Esperar a que la tabla de resultados o el mensaje de paz y salvo aparezca
+    try {
+      await page.waitForFunction(
+        () => document.querySelectorAll('table tbody tr').length > 0 || document.body.innerText.includes('no posee a la fecha'),
+        { timeout: 15000 }
+      );
+    } catch (e) {
+      console.log("No se detectó tabla inmediata, extrayendo contenido disponible...");
+    }
+
+    // Extraer los datos reales del DOM de la página del SIMIT
     const resultado = await page.evaluate((cedulaBuscada) => {
       const filas = document.querySelectorAll('table tbody tr');
       let registros = [];
 
       filas.forEach(row => {
         const cols = row.querySelectorAll('td');
-        if (cols.length >= 6) {
+        if (cols.length >= 7) {
           registros.push({
             numero: cols[0]?.innerText.trim() || '',
             tipo: cols[0]?.innerText.toLowerCase().includes('comparendo') ? 'Comparendo' : 'Cobro coactivo',
@@ -54,7 +75,11 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
         }
       });
 
-      return { cedula: cedulaBuscada, registros };
+      return { 
+        cedula: cedulaBuscada, 
+        registros,
+        esPazYSalvo: document.body.innerText.includes('no posee a la fecha')
+      };
     }, cedula);
 
     await browser.close();
@@ -67,4 +92,4 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor iniciado en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor SIMIT activo en puerto ${PORT}`));
