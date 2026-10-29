@@ -38,8 +38,19 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     await page.keyboard.type(cedula, { delay: 60 });
     await page.keyboard.press('Enter');
 
-    // 5. Esperar a que cargue la información visual
-    await new Promise(r => setTimeout(r, 6000));
+    // 5. Esperar a que cargue la información visual y se renderice la tabla
+    await new Promise(r => setTimeout(r, 4000));
+    
+    try {
+      await page.waitForFunction(
+        () => document.body.innerText.includes('$') || document.body.innerText.toLowerCase().includes('no posee'),
+        { timeout: 10000 }
+      );
+    } catch (e) {
+      console.log("Esperando tiempo de respaldo...");
+    }
+
+    await new Promise(r => setTimeout(r, 3000));
 
     // 6. Extraer registros
     const resultado = await page.evaluate((cedulaBuscada) => {
