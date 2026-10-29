@@ -11,6 +11,7 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
   let browser;
 
   try {
+    // 1. Inicializar navegador con argumentos seguros para servidores (Render)
     browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -24,47 +25,57 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-    // Navegar a la plataforma SIMIT
+    let datosInterceptados = null;
+
+    // 2. Interceptar respuestas de la API del SIMIT para capturar datos en crudo
+    page.on('response', async (response) => {
+      const url = response.url();
+      if (url.includes('estado-cuenta') || url.includes('comparendo') || url.includes('fcm')) {
+        try {
+          const contentType = response.headers()['content-type'] || '';
+          if (contentType.includes('application/json')) {
+            const json = await response.json();
+            if (json && (json.comparendos || json.multas || Array.isArray(json) || json.data)) {
+              datosInterceptados = json;
+            }
+          }
+        } catch (e) {
+          // Ignorar errores de parsing en recursos estáticos
+        }
+      }
+    });
+
+    // 3. Navegar al SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'networkidle2',
       timeout: 60000
     });
 
-    // Escribir el número de documento
+    // 4. Ingresar cédula y presionar Enter
     await page.waitForSelector('input', { timeout: 15000 });
     await page.click('input');
-    await page.keyboard.type(cedula, { delay: 50 });
+    await page.keyboard.type(cedula, { delay: 60 });
     await page.keyboard.press('Enter');
 
-    // Esperar de forma inteligente a que cargue la tabla o aparezca un texto
-    try {
-      await page.waitForFunction(
-        () => {
-          const text = document.body.innerText.toLowerCase();
-          return document.querySelectorAll('tr, mat-row, .mat-row, .row').length > 3 || 
-                 text.includes('comparendo') || 
-                 text.includes('multa') || 
-                 text.includes('no posee a la fecha');
-        },
-        { timeout: 12000 }
-      );
-    } catch (e) {
-      console.log("Continuando con la extracción forzada...");
+    // 5. Esperar de forma inteligente a que responda la red o cargue el DOM
+    let tiempoEspera = 0;
+    while (!datosInterceptados && tiempoEspera < 12) {
+      await new Promise(r => setTimeout(r, 1000));
+      tiempoEspera++;
     }
 
     await new Promise(r => setTimeout(r, 3000));
 
-    // Extraer registros
-    const resultado = await page.evaluate((cedulaBuscada) => {
+    // 6. Extracción robusta desde el DOM visual como respaldo
+    const resultadoDOM = await page.evaluate((cedulaBuscada) => {
       const bodyText = document.body.innerText || '';
-      const filas = document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, li');
+      const filas = document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, li, .card');
       let registros = [];
 
       filas.forEach(row => {
         const textoFila = row.innerText || '';
-        if (textoFila.length > 15 && (textoFila.includes('$') || /\d{2}\/\d{2}\/\d{4}/.test(textoFila))) {
-          if (!textoFila.toLowerCase().includes('estado de cuenta') && !textoFila.toLowerCase().includes('infracción')) {
-            
+        if (textoFila.length > 10 && (textoFila.includes('$') || /\d{2}\/\d{2}\/\d{4}/.test(textoFila))) {
+          if (!textoFila.toLowerCase().includes('estado de cuenta')) {
             const montos = textoFila.match(/\$\s*[\d\.,]+/g);
             let valor = 0;
             if (montos && montos.length > 0) {
@@ -104,11 +115,25 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
       };
     }, cedula);
 
+    // Cerrar navegador correctamente
     await browser.close();
-    res.json(resultado);
+
+    // Responder combinando la intercepción de red o el respaldo visual
+    if (datosInterceptados) {
+      res.json({
+        cedula,
+        origen: 'api-red',
+        datosBrutos: datosInterceptados,
+        ...resultadoDOM
+      });
+    } else {
+      res.json(resultadoDOM);
+    }
 
   } catch (error) {
-    if (browser) await browser.close();
+    if (browser) {
+      try { await browser.close(); } catch (e) {}
+    }
     res.status(500).json({ error: "Error consultando el SIMIT", detalle: error.message });
   }
 });
