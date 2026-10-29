@@ -24,58 +24,73 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-    // Navegar al SIMIT
+    // Navegar a la plataforma SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
 
-    // Escribir la cédula o placa en el buscador del SIMIT
+    // Esperar y escribir el número de documento
     await page.waitForSelector('input', { timeout: 15000 });
     await page.click('input');
-    await page.keyboard.type(cedula, { delay: 50 });
+    await page.keyboard.type(cedula, { delay: 40 });
     await page.keyboard.press('Enter');
 
-    // Esperar a que la tabla cargue los resultados o el mensaje de paz y salvo
-    try {
-      await page.waitForFunction(
-        () => document.querySelectorAll('table tbody tr').length > 0 || document.body.innerText.includes('no posee a la fecha'),
-        { timeout: 15000 }
-      );
-    } catch (e) {
-      console.log("Tiempo de espera agotado para la tabla, extrayendo datos disponibles...");
-    }
+    // Esperar un tiempo prudente a que los componentes dinámicos de Angular rendericen
+    await new Promise(r => setTimeout(r, 6000));
 
-    // Extraer tanto comparendos como multas del DOM de la tabla
+    // Extraer y procesar la información del DOM
     const resultado = await page.evaluate((cedulaBuscada) => {
-      const filas = document.querySelectorAll('table tbody tr');
+      const bodyText = document.body.innerText || '';
+      
+      // Buscar filas en tablas convencionales o en componentes de Angular Material (.mat-row)
+      const filas = document.querySelectorAll('table tbody tr, mat-row, .mat-row, .cdk-row');
       let registros = [];
 
       filas.forEach(row => {
-        const cols = row.querySelectorAll('td');
-        // Validamos que la fila tenga celdas suficientes con datos de multas/comparendos
-        if (cols.length >= 6) {
-          const textoFila = row.innerText.toLowerCase();
-          
+        // Obtener celdas o elementos hijos
+        const cols = row.querySelectorAll('td, mat-cell, .mat-cell, div');
+        const textoFila = row.innerText || '';
+
+        // Filtrar filas válidas que contengan fechas, montos o estados de tránsito
+        if (cols.length >= 4 && (textoFila.includes('$') || /\d{2}\/\d{2}\/\d{4}/.test(textoFila))) {
+          // Extraer todos los valores numéricos con formato de moneda encontrados en la fila
+          const montos = textoFila.match(/\$\s*[\d\.,]+/g);
+          let valor = 0;
+          if (montos && montos.length > 0) {
+            valor = parseInt(montos[montos.length - 1].replace(/[^0-9]/g, '')) || 0;
+          }
+
+          // Determinar si es Comparendo, Multa o Cobro Coactivo
+          let tipoEvaluado = 'Multa';
+          if (textoFila.toLowerCase().includes('comparendo')) {
+            tipoEvaluado = 'Comparendo';
+          } else if (textoFila.toLowerCase().includes('coactivo')) {
+            tipoEvaluado = 'Cobro Coactivo';
+          }
+
           registros.push({
-            numero: cols[0]?.innerText.trim() || '',
-            // Identifica si es Comparendo, Multa o Coactivo de forma flexible
-            tipo: textoFila.includes('comparendo') ? 'Comparendo' : (textoFila.includes('multa') ? 'Multa' : 'Obligación Tránsito'),
-            fechaImposicion: cols[0]?.innerText.match(/\d{2}\/\d{2}\/\d{4}/)?.[0] || '',
-            placa: cols[2]?.innerText.trim() || 'N/A',
-            secretaria: cols[3]?.innerText.trim() || 'N/A',
-            infraccion: cols[4]?.innerText.trim() || 'N/A',
-            estado: cols[5]?.innerText.trim() || 'Pendiente',
-            // Captura el valor total limpiando signos de moneda y puntos
-            valorTotal: parseInt(cols[6]?.innerText.replace(/[^0-9]/g, '') || cols[7]?.innerText.replace(/[^0-9]/g, '') || '0')
+            numero: textoFila.match(/\b\d{10,20}\b/)?.[0] || 'N/A',
+            tipo: tipoEvaluado,
+            fechaImposicion: textoFila.match(/\d{2}\/\d{2}\/\d{4}/)?.[0] || 'N/A',
+            placa: textoFila.match(/\b[A-Z]{3}\d{2,3}[A-Z]?\b/)?.[0] || 'N/A',
+            secretaria: 'Tránsito / SIMIT',
+            infraccion: textoFila.match(/\b[A-Z]\d{2}\b/)?.[0] || 'Infracción registrada',
+            estado: textoFila.toLowerCase().includes('pendiente') ? 'Pendiente' : 'En cobro',
+            valorTotal: valor
           });
         }
       });
 
-      return { 
-        cedula: cedulaBuscada, 
-        registros,
-        esPazYSalvo: document.body.innerText.includes('no posee a la fecha')
+      // Validar si la cuenta realmente no tiene infracciones
+      const esPaz = bodyText.toLowerCase().includes('no posee a la fecha') || 
+                    bodyText.toLowerCase().includes('sin comparendos') || 
+                    (registros.length === 0 && bodyText.toLowerCase().includes('paz y salvo'));
+
+      return {
+        cedula: cedulaBuscada,
+        registros: registros,
+        esPazYSalvo: esPaz
       };
     }, cedula);
 
@@ -88,5 +103,5 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor SIMIT activo en puerto ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
