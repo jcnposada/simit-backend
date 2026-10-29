@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer');
-const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -12,18 +11,21 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
   let browser;
 
   try {
-    // Configurar Puppeteer asegurando la ruta de Chrome en Render
+    // Flags ultra-ligeros para evitar sobrepasar los 512MB de RAM en Render
     const options = {
       headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process', // Ejecuta en un solo proceso para ahorrar memoria
+        '--disable-extensions'
       ]
     };
 
-    // Si estamos en el entorno de Render, definir la ruta del navegador descargado
     if (process.env.RENDER) {
       options.executablePath = puppeteer.executablePath();
     }
@@ -31,24 +33,35 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     browser = await puppeteer.launch(options);
     const page = await browser.newPage();
     
+    // Bloquear imágenes, fuentes y CSS para reducir uso de memoria y acelerar la carga
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     // Navegar al SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
-      waitUntil: 'networkidle2',
+      waitUntil: 'domcontentloaded',
       timeout: 60000
     });
 
-    // Escribir la cédula
+    // Ingresar la cédula
     await page.waitForSelector('input', { timeout: 15000 });
     await page.click('input');
-    await page.keyboard.type(cedula, { delay: 60 });
+    await page.keyboard.type(cedula, { delay: 40 });
     await page.keyboard.press('Enter');
 
-    // Esperar a que la SPA de Angular procese e inyecte los datos
-    await new Promise(r => setTimeout(r, 8000));
+    // Esperar a que la SPA de Angular procese la información
+    await new Promise(r => setTimeout(r, 6000));
 
-    // Extraer registros y montos reales
+    // Extraer registros
     const resultado = await page.evaluate((cedulaBuscada) => {
       const bodyText = document.body.innerText || '';
       const nodos = document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, div, td');
