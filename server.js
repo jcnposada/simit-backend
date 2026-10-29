@@ -1,4 +1,30 @@
-// Navegar a la plataforma SIMIT
+const express = require('express');
+const cors = require('cors');
+const puppeteer = require('puppeteer');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.get('/api/consultar-simit/:cedula', async (req, res) => {
+  const { cedula } = req.params;
+  let browser;
+
+  try {
+    browser = await puppeteer.launch({
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu'
+      ]
+    });
+
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    // Navegar a la plataforma SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
       waitUntil: 'domcontentloaded',
       timeout: 60000
@@ -10,7 +36,7 @@
     await page.keyboard.type(cedula, { delay: 50 });
     await page.keyboard.press('Enter');
 
-    // Esperar de forma inteligente a que cargue la tabla o aparezca un texto de resultado
+    // Esperar de forma inteligente a que cargue la tabla o aparezca un texto
     try {
       await page.waitForFunction(
         () => {
@@ -26,10 +52,9 @@
       console.log("Continuando con la extracción forzada...");
     }
 
-    // Pequeña pausa de seguridad para renderizado completo de Angular
     await new Promise(r => setTimeout(r, 3000));
 
-    // Extraer registros mediante un escaneo profundo de texto y filas
+    // Extraer registros
     const resultado = await page.evaluate((cedulaBuscada) => {
       const bodyText = document.body.innerText || '';
       const filas = document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, li');
@@ -37,12 +62,9 @@
 
       filas.forEach(row => {
         const textoFila = row.innerText || '';
-        
-        // Verificamos si la fila contiene datos reales de una multa o comparendo
         if (textoFila.length > 15 && (textoFila.includes('$') || /\d{2}\/\d{2}\/\d{4}/.test(textoFila))) {
           if (!textoFila.toLowerCase().includes('estado de cuenta') && !textoFila.toLowerCase().includes('infracción')) {
             
-            // Extraer montos de dinero limpios
             const montos = textoFila.match(/\$\s*[\d\.,]+/g);
             let valor = 0;
             if (montos && montos.length > 0) {
@@ -51,9 +73,9 @@
 
             let tipoSancion = 'Comparendo';
             if (textoFila.toLowerCase().includes('multa')) {
-              tipoMulta = 'Multa';
+              tipoSancion = 'Multa';
             } else if (textoFila.toLowerCase().includes('coactivo')) {
-              tipoMulta = 'Cobro Coactivo';
+              tipoSancion = 'Cobro Coactivo';
             }
 
             registros.push({
@@ -70,11 +92,8 @@
         }
       });
 
-      // Eliminar duplicados si los hubiera
       const registrosUnicos = Array.from(new Set(registros.map(a => a.numero)))
-        .map(numero => {
-          return registros.find(a => a.numero === numero);
-        });
+        .map(numero => registros.find(a => a.numero === numero));
 
       const esPaz = bodyText.toLowerCase().includes('no posee a la fecha') && registrosUnicos.length === 0;
 
@@ -84,3 +103,15 @@
         esPazYSalvo: esPaz
       };
     }, cedula);
+
+    await browser.close();
+    res.json(resultado);
+
+  } catch (error) {
+    if (browser) await browser.close();
+    res.status(500).json({ error: "Error consultando el SIMIT", detalle: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
