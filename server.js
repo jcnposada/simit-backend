@@ -1,6 +1,6 @@
-import express from 'express';
-import cors from 'cors';
-import puppeteer from 'puppeteer';
+const express = require('express');
+const cors = require('cors');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(cors());
@@ -22,7 +22,7 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
       ]
     });
 
-    // 2. CREAR LA PÁGINA (¡Esta es la línea que faltaba!)
+    // 2. Crear página de manera segura
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
@@ -38,10 +38,10 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     await page.keyboard.type(cedula, { delay: 60 });
     await page.keyboard.press('Enter');
 
-    // 5. Esperar a que cargue la información
+    // 5. Esperar a que cargue la información visual
     await new Promise(r => setTimeout(r, 6000));
 
-    // 6. Extraer registros con la variable 'page' correctamente definida
+    // 6. Extraer registros
     const resultado = await page.evaluate((cedulaBuscada) => {
       const bodyText = document.body.innerText || '';
       const elementos = document.querySelectorAll('mat-row, .mat-row, tr, app-estado-cuenta, .card, div');
