@@ -32,7 +32,7 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     browser = await puppeteer.launch(options);
     const page = await browser.newPage();
     
-    // Interceptar para aligerar recursos
+    // Interceptar recursos innecesarios para ahorrar memoria
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
@@ -49,31 +49,28 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
       timeout: 60000
     });
 
+    // Esperar el input, escribir la cédula y presionar Enter
     await page.waitForSelector('input', { timeout: 15000 });
     await page.click('input');
-    await page.keyboard.type(cedula, { delay: 40 });
+    await page.keyboard.type(cedula, { delay: 50 });
     await page.keyboard.press('Enter');
 
-    // Damos un tiempo prudente para que Angular pinte las tablas en pantalla
-    await new Promise(r => setTimeout(r, 8000));
+    // TIEMPO CLAVE: Aumentamos a 12 segundos para que el SIMIT responda la consulta asíncrona
+    await new Promise(r => setTimeout(r, 12000));
 
-    // Extraer todo el contenido visible para analizar los bloques de multas
+    // Extraer registros del DOM ya cargado
     const resultado = await page.evaluate((cedulaBuscada) => {
       const bodyText = document.body.innerText || '';
-      
-      // Capturamos cualquier contenedor de filas o tarjetas de la interfaz
-      const elementos = document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, app-estado-cuenta div, mat-card');
+      const nodos = document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, div, td, app-estado-cuenta div');
       let registros = [];
 
-      elementos.forEach(el => {
+      nodos.forEach(el => {
         const texto = el.innerText ? el.innerText.trim() : '';
         
-        // Buscamos bloques que contengan signos de peso o estructura de valores monetarios
-        if (texto.includes('$') || /\$\s*\d{1,3}(\.\d{3})+/.test(texto) || /total a pagar/i.test(texto)) {
-          // Filtramos cabeceras genéricas
-          if (!texto.toLowerCase().includes('estado de cuenta de infractores')) {
+        // Buscamos líneas que contengan montos en pesos o símbolos monetarios de multas
+        if (texto.includes('$') || /\$\s*\d{1,3}(\.\d{3})+/.test(texto)) {
+          if (!texto.toLowerCase().includes('estado de cuenta de infractores') && !texto.toLowerCase().includes('total a pagar')) {
             
-            // Extraer todos los números que parezcan montos en pesos
             const matchesMoneda = texto.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
             let valorEncontrado = 0;
 
@@ -84,7 +81,6 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
 
             if (valorEncontrado > 0) {
               registros.push({
-                textoCompletoBloque: texto.substring(0, 150), // Para depurar qué capturó
                 numero: texto.match(/\b\d{10,20}\b/)?.[0] || 'N/A',
                 tipo: /multa/i.test(texto) ? 'Multa' : 'Comparendo',
                 fechaImposicion: texto.match(/\d{2}\/\d{2}\/\d{4}/)?.[0] || 'N/A',
@@ -96,15 +92,15 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
         }
       });
 
-      // Eliminar duplicados basándose en el número de comparendo/multa
+      // Eliminar duplicados
       const unicos = Array.from(new Set(registros.map(r => r.numero)))
         .map(num => registros.find(r => r.numero === num));
 
+      // Consideramos paz y salvo SOLO si explícitamente dice el texto de paz y salvo y no hay registros
       const esPazYSalvo = bodyText.toLowerCase().includes('no posee a la fecha') && unicos.length === 0;
 
       return {
         cedula: cedulaBuscada,
-        rawBodySample: bodyText.substring(0, 400), // Muestra del texto general de la web
         registros: unicos,
         esPazYSalvo
       };
