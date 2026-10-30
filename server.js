@@ -20,8 +20,7 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
         '--disable-gpu',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',
-        '--disable-extensions'
+        '--single-process'
       ]
     };
 
@@ -32,53 +31,77 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     browser = await puppeteer.launch(options);
     const page = await browser.newPage();
 
-    let jsonRespuesta = null;
+    let apiData = null;
 
-    // Escuchar todas las respuestas de red del SIMIT
+    // Escuchar directamente las respuestas XHR/Fetch de la API del SIMIT
     page.on('response', async (response) => {
       const url = response.url();
-      // Filtrar peticiones a la API backend del SIMIT
-      if (url.includes('simit') && (url.includes('estado-cuenta') || url.includes('comparendo') || url.includes('ciudadano'))) {
+      if (url.includes('simit') || url.includes('estado-cuenta') || url.includes('comparendo')) {
         try {
-          const text = await response.text();
-          if (text.startsWith('{') || text.startsWith('[')) {
-            const parsed = JSON.parse(text);
-            if (parsed) {
-              jsonRespuesta = parsed;
+          const contentType = response.headers()['content-type'] || '';
+          if (contentType.includes('application/json')) {
+            const json = await response.json();
+            if (json && (json.comparendos || json.multas || json.registros || Array.isArray(json))) {
+              apiData = json;
             }
           }
         } catch (e) {
-          // Ignorar respuestas que no sean JSON válido
+          // Ignorar respuestas que no sean JSON
         }
       }
     });
 
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-    // Cargar la página dejando que Angular inicialice correctamente sus scripts
+    // Navegar al portal del SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
       waitUntil: 'networkidle2',
-      timeout: 45000
+      timeout: 60000
     });
 
-    // Interactuar con el formulario
-    await page.waitForSelector('input', { timeout: 10000 });
-    await page.click('input');
-    await page.keyboard.type(cedula, { delay: 30 });
-    await page.keyboard.press('Enter');
+    // Esperar al campo de texto
+    const inputSelector = 'input[type="text"], input[formcontrolname], input';
+    await page.waitForSelector(inputSelector, { timeout: 15000 });
+    
+    // Limpiar e ingresar la cédula
+    await page.click(inputSelector);
+    await page.keyboard.down('Control');
+    await page.keyboard.press('A');
+    await page.keyboard.up('Control');
+    await page.keyboard.press('Backspace');
+    await page.type(inputSelector, cedula, { delay: 60 });
 
-    // Esperar a que la petición XHR complete la respuesta
-    let intentos = 0;
-    while (!jsonRespuesta && intentos < 15) {
+    // Buscar y hacer clic explícito en el botón de consulta
+    const botonEncontrado = await page.evaluate(() => {
+      const botones = Array.from(document.querySelectorAll('button, a, input[type="submit"]'));
+      const btn = botones.find(b => {
+        const txt = (b.innerText || b.value || '').toLowerCase();
+        return txt.includes('consultar') || txt.includes('buscar') || txt.includes('estado de cuenta');
+      });
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    });
+
+    // Si no encontró botón por texto, presionar Enter
+    if (!botonEncontrado) {
+      await page.keyboard.press('Enter');
+    }
+
+    // Esperar a que la petición asíncrona retorne datos
+    let transcurrido = 0;
+    while (!apiData && transcurrido < 12000) {
       await new Promise(r => setTimeout(r, 500));
-      intentos++;
+      transcurrido += 500;
     }
 
     let registros = [];
 
-    // 1. Extraer si capturó la API de Angular
-    if (jsonRespuesta) {
-      const lista = jsonRespuesta.comparendos || jsonRespuesta.multas || jsonRespuesta.resoluciones || (Array.isArray(jsonRespuesta) ? jsonRespuesta : []);
+    // 1. Extraer los datos desde la interceptación de la API JSON
+    if (apiData) {
+      const lista = apiData.comparendos || apiData.multas || apiData.registros || (Array.isArray(apiData) ? apiData : []);
       
       registros = lista.map(item => ({
         numero: item.numeroComparendo || item.numero || item.id || 'N/A',
@@ -92,34 +115,34 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
       }));
     }
 
-    // 2. Respaldo por lectura de celdas HTML si el JSON no trajo la estructura esperada
+    // 2. Respaldo: Extracción desde el DOM
     if (registros.length === 0) {
       registros = await page.evaluate(() => {
-        const filas = document.querySelectorAll('tr, mat-row, .cdk-row, .mat-row');
-        let encontrados = [];
+        const elementos = Array.from(document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row'));
+        let resultado = [];
 
-        filas.forEach(f => {
-          const txt = f.innerText || '';
+        elementos.forEach(el => {
+          const txt = el.innerText || '';
           if (txt.includes('$') || /\d{1,3}(\.\d{3})+/.test(txt)) {
-            const matches = txt.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
-            if (matches) {
-              const montos = matches.map(m => parseInt(m.replace(/[^0-9]/g, '')) || 0);
-              const maxMonto = Math.max(...montos);
-              if (maxMonto > 0) {
-                encontrados.push({
+            const coincidencias = txt.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
+            if (coincidencias) {
+              const valores = coincidencias.map(m => parseInt(m.replace(/[^0-9]/g, '')) || 0);
+              const maxVal = Math.max(...valores);
+              if (maxVal > 0) {
+                resultado.push({
                   numero: txt.match(/\b\d{10,20}\b/)?.[0] || 'N/A',
                   tipo: 'Comparendo/Multa',
                   fechaImposicion: txt.match(/\d{2}\/\d{2}\/\d{4}/)?.[0] || 'N/A',
                   placa: txt.match(/\b[A-Z]{3}\d{2,3}[A-Z]?\b/)?.[0] || 'N/A',
-                  valorTotal: maxMonto
+                  valorTotal: maxVal
                 });
               }
             }
           }
         });
 
-        return Array.from(new Set(encontrados.map(a => a.numero)))
-          .map(num => encontrados.find(a => a.numero === num));
+        return Array.from(new Set(resultado.map(a => a.numero)))
+          .map(num => resultado.find(a => a.numero === num));
       });
     }
 
