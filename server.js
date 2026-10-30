@@ -33,10 +33,10 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
 
     let apiData = null;
 
-    // Escuchar directamente las respuestas XHR/Fetch de la API del SIMIT
+    // Capturar la respuesta JSON interna del SIMIT automáticamente al viajar por la red
     page.on('response', async (response) => {
       const url = response.url();
-      if (url.includes('simit') || url.includes('estado-cuenta') || url.includes('comparendo')) {
+      if (url.includes('simit') && (url.includes('estado-cuenta') || url.includes('comparendo') || url.includes('multa') || url.includes('api'))) {
         try {
           const contentType = response.headers()['content-type'] || '';
           if (contentType.includes('application/json')) {
@@ -45,61 +45,38 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
               apiData = json;
             }
           }
-        } catch (e) {
-          // Ignorar respuestas que no sean JSON
-        }
+        } catch (e) {}
       }
     });
 
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-    // Navegar al portal del SIMIT
+    // Ir directo a la interfaz del SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
       waitUntil: 'networkidle2',
       timeout: 60000
     });
 
-    // Esperar al campo de texto
-    const inputSelector = 'input[type="text"], input[formcontrolname], input';
-    await page.waitForSelector(inputSelector, { timeout: 15000 });
+    // Esperar a que el input de texto esté completamente disponible en el DOM
+    await page.waitForSelector('input', { timeout: 20000 });
+
+    // Enfoque seguro y escritura directa por teclado emulando usuario real
+    await page.focus('input');
+    await page.keyboard.type(cedula, { delay: 100 });
     
-    // Limpiar e ingresar la cédula
-    await page.click(inputSelector);
-    await page.keyboard.down('Control');
-    await page.keyboard.press('A');
-    await page.keyboard.up('Control');
-    await page.keyboard.press('Backspace');
-    await page.type(inputSelector, cedula, { delay: 60 });
+    // Disparar la búsqueda presionando Enter directamente
+    await page.keyboard.press('Enter');
 
-    // Buscar y hacer clic explícito en el botón de consulta
-    const botonEncontrado = await page.evaluate(() => {
-      const botones = Array.from(document.querySelectorAll('button, a, input[type="submit"]'));
-      const btn = botones.find(b => {
-        const txt = (b.innerText || b.value || '').toLowerCase();
-        return txt.includes('consultar') || txt.includes('buscar') || txt.includes('estado de cuenta');
-      });
-      if (btn) {
-        btn.click();
-        return true;
-      }
-      return false;
-    });
-
-    // Si no encontró botón por texto, presionar Enter
-    if (!botonEncontrado) {
-      await page.keyboard.press('Enter');
-    }
-
-    // Esperar a que la petición asíncrona retorne datos
-    let transcurrido = 0;
-    while (!apiData && transcurrido < 12000) {
+    // Esperar de forma dinámica a que la red responda el JSON del SIMIT (máximo 12 segundos)
+    let tiempoEspera = 0;
+    while (!apiData && tiempoEspera < 12000) {
       await new Promise(r => setTimeout(r, 500));
-      transcurrido += 500;
+      tiempoEspera += 500;
     }
 
     let registros = [];
 
-    // 1. Extraer los datos desde la interceptación de la API JSON
+    // 1. Procesar datos si la red capturó la API oficial
     if (apiData) {
       const lista = apiData.comparendos || apiData.multas || apiData.registros || (Array.isArray(apiData) ? apiData : []);
       
@@ -115,34 +92,34 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
       }));
     }
 
-    // 2. Respaldo: Extracción desde el DOM
+    // 2. Si la red no interceptó el JSON, hacer un respaldo leyendo las filas visuales de la tabla
     if (registros.length === 0) {
       registros = await page.evaluate(() => {
-        const elementos = Array.from(document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row'));
-        let resultado = [];
+        const filas = Array.from(document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, div'));
+        let encontrados = [];
 
-        elementos.forEach(el => {
-          const txt = el.innerText || '';
-          if (txt.includes('$') || /\d{1,3}(\.\d{3})+/.test(txt)) {
-            const coincidencias = txt.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
-            if (coincidencias) {
-              const valores = coincidencias.map(m => parseInt(m.replace(/[^0-9]/g, '')) || 0);
-              const maxVal = Math.max(...valores);
-              if (maxVal > 0) {
-                resultado.push({
+        filas.forEach(f => {
+          const txt = f.innerText || '';
+          if (txt.includes('$') && (txt.length < 300)) {
+            const matches = txt.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
+            if (matches) {
+              const montos = matches.map(m => parseInt(m.replace(/[^0-9]/g, '')) || 0);
+              const maxMonto = Math.max(...montos);
+              if (maxMonto > 0) {
+                encontrados.push({
                   numero: txt.match(/\b\d{10,20}\b/)?.[0] || 'N/A',
-                  tipo: 'Comparendo/Multa',
+                  tipo: /multa/i.test(txt) ? 'Multa' : 'Comparendo',
                   fechaImposicion: txt.match(/\d{2}\/\d{2}\/\d{4}/)?.[0] || 'N/A',
                   placa: txt.match(/\b[A-Z]{3}\d{2,3}[A-Z]?\b/)?.[0] || 'N/A',
-                  valorTotal: maxVal
+                  valorTotal: maxMonto
                 });
               }
             }
           }
         });
 
-        return Array.from(new Set(resultado.map(a => a.numero)))
-          .map(num => resultado.find(a => a.numero === num));
+        return Array.from(new Set(encontrados.map(a => a.numero)))
+          .map(num => encontrados.find(a => a.numero === num));
       });
     }
 
