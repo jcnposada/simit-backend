@@ -10,7 +10,7 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
   const { cedula } = req.params;
   let browser;
 
-  console.log(`[LOG] Realizando consulta real para la cédula: ${cedula}`);
+  console.log(`[LOG] Iniciando consulta para documento: ${cedula}`);
 
   try {
     const options = {
@@ -33,31 +33,47 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     browser = await puppeteer.launch(options);
     const page = await browser.newPage();
 
+    // Enmascarar el agente para evitar bloqueos primarios de bot
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-    // Navegar al portal del SIMIT
+    // Interceptar cabeceras para simular un navegador real completo
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'es-ES,es;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8'
+    });
+
+    // Cargar directamente la URL de servicios o estado de cuenta del SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'networkidle2',
       timeout: 60000
     });
 
-    // Ingresar la cédula en el campo de texto
     await page.waitForSelector('input', { timeout: 20000 });
     await page.focus('input');
-    await page.keyboard.type(cedula, { delay: 80 });
+    await page.keyboard.type(cedula, { delay: 100 });
     await page.keyboard.press('Enter');
 
-    // Esperar a que la interfaz procese la consulta
+    // Dar tiempo prudente para la carga asíncrona de Angular
     await new Promise(r => setTimeout(r, 10000));
 
-    // Extraer exclusivamente los datos reales visibles en la tabla del SIMIT
+    // Evaluar si aparece el texto explícito de bloqueo o restricción de Cloudflare/SIMIT
+    const contenidoPagina = await page.evaluate(() => document.body.innerText || '');
+    
+    if (contenidoPagina.includes('Access Denied') || contenidoPagina.includes('bloqueado') || contenidoPagina.length < 200) {
+      await browser.close();
+      return res.status(403).json({ 
+        error: "El servidor oficial del SIMIT ha restringido temporalmente las consultas automatizadas desde este nodo. Por favor, intenta nuevamente más tarde." 
+      });
+    }
+
+    // Extracción estricta de registros reales
     const registros = await page.evaluate(() => {
       let encontrados = [];
-      const elementos = Array.from(document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row'));
+      const filas = Array.from(document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row'));
 
-      elementos.forEach((el) => {
+      filas.forEach((el) => {
         const texto = el.innerText || '';
-        if (texto.includes('$') && texto.length < 600) {
+        if (texto.includes('$') && texto.length < 500) {
           const matches = texto.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
           if (matches) {
             const valores = matches.map(m => parseInt(m.replace(/[^0-9]/g, '')) || 0);
@@ -79,7 +95,7 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
         }
       });
 
-      // Filtrar duplicados
+      // Filtrar duplicados exactos
       const unicos = [];
       const mapVal = new Set();
       encontrados.forEach(item => {
@@ -96,7 +112,6 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
 
     const esPazYSalvo = registros.length === 0;
 
-    // Devolver estrictamente lo que arroja la consulta real (sin datos inventados)
     res.json({
       cedula,
       registros,
