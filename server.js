@@ -10,7 +10,7 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
   const { cedula } = req.params;
   let browser;
 
-  console.log(`[LOG] Iniciando consulta para la cédula: ${cedula}`);
+  console.log(`[LOG] Consultando cédula en SIMIT: ${cedula}`);
 
   try {
     const options = {
@@ -33,116 +33,92 @@ app.get('/api/consultar-simit/:cedula', async (req, res) => {
     browser = await puppeteer.launch(options);
     const page = await browser.newPage();
 
-    let apiData = null;
-
-    // Escuchar respuestas de red para interceptar el JSON oficial del SIMIT si viaja por XHR
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (url.includes('simit') && (url.includes('estado-cuenta') || url.includes('comparendo') || url.includes('multa'))) {
-        try {
-          const contentType = response.headers()['content-type'] || '';
-          if (contentType.includes('application/json')) {
-            const json = await response.json();
-            if (json) {
-              apiData = json;
-            }
-          }
-        } catch (e) {}
-      }
-    });
-
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
+    // Navegar al SIMIT
     await page.goto('https://www.fcm.org.co/simit/#/estado-cuenta', {
       waitUntil: 'networkidle2',
       timeout: 60000
     });
 
+    // Ingresar cédula
     await page.waitForSelector('input', { timeout: 20000 });
-
     await page.focus('input');
     await page.keyboard.type(cedula, { delay: 100 });
     await page.keyboard.press('Enter');
 
-    // Dar tiempo a que Angular pinte los resultados en pantalla y responda la red
-    let tiempoEspera = 0;
-    while (!apiData && tiempoEspera < 10000) {
-      await new Promise(r => setTimeout(r, 500));
-      tiempoEspera += 500;
-    }
+    // Esperar a que la tabla de Angular renderice los datos completos (12 segundos)
+    await new Promise(r => setTimeout(r, 12000));
 
-    let registros = [];
+    // Extracción avanzada desde los elementos reales del DOM del SIMIT
+    const registros = await page.evaluate(() => {
+      let resultados = [];
+      
+      // Buscamos filas de tablas o tarjetas donde el SIMIT despliega los comparendos
+      const filas = Array.from(document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, app-estado-cuenta div, .card, ion-card'));
 
-    // 1. Procesar si la API devolvió datos directamente
-    if (apiData) {
-      const lista = apiData.comparendos || apiData.multas || apiData.registros || (Array.isArray(apiData) ? apiData : []);
-      registros = lista.map(item => ({
-        numero: item.numeroComparendo || item.numero || item.id || 'N/A',
-        tipo: item.tipoSancion || (item.esMulta ? 'Multa' : 'Comparendo'),
-        fechaImposicion: item.fechaComparendo || item.fecha || 'N/A',
-        placa: item.placa || 'N/A',
-        secretaria: item.organismoTransito || 'Tránsito / Movilidad',
-        infraccion: item.codigoInfraccion || 'Registrada',
-        estado: item.estado || 'Pendiente',
-        valorTotal: parseInt(item.valorPagar || item.valorTotal || item.valor || item.totalPagar || 0)
-      }));
-    }
+      filas.forEach((fila, index) => {
+        const textoFila = fila.innerText || '';
+        
+        // Verificamos que la fila hable de comparendos/multas y tenga valores monetarios
+        if ((textoFila.includes('Comparendo') || textoFila.includes('Multa') || textoFila.includes('$')) && textoFila.length < 800) {
+          
+          // Extraer todos los montos en formato de dinero o números grandes
+          const matchesMoneda = textoFila.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
+          let valorFinal = 0;
 
-    // 2. Extracción profunda y precisa desde el DOM visual de la tabla del SIMIT
-    if (registros.length === 0) {
-      registros = await page.evaluate(() => {
-        // Buscamos contenedores o filas de la tabla de resultados
-        const filas = Array.from(document.querySelectorAll('tr, mat-row, .mat-row, .cdk-row, app-estado-cuenta mat-card, div'));
-        let encontrados = [];
-
-        filas.forEach(f => {
-          const txt = f.innerText || '';
-          // Verificamos que el bloque contenga montos en pesos y tenga un tamaño manejable de tarjeta/fila
-          if (txt.includes('$') && txt.length < 500 && !txt.includes('ESTADO DE CUENTA')) {
-            const matchesMoneda = txt.match(/\$\s*(\d{1,3}(\.\d{3})+|\d+)/g);
-            
-            if (matchesMoneda && matchesMoneda.length > 0) {
-              const montos = matchesMoneda.map(m => parseInt(m.replace(/[^0-9]/g, '')) || 0);
-              const maxMonto = Math.max(...montos);
-
-              if (maxMonto > 0) {
-                // Extraer número de comparendo (generalmente de 10 a 15 dígitos)
-                const numComparendo = txt.match(/\b\d{10,15}\b/)?.[0] || 'N/A';
-                // Extraer fecha (formato dd/mm/yyyy o yyyy-mm-dd)
-                const fecha = txt.match(/\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2}/)?.[0] || 'N/A';
-                // Extraer placa (3 letras seguidas de 2 o 3 números y opcional una letra)
-                const placaMatch = txt.match(/\b[A-Z]{3}\s*\d{2,3}[A-Z]?\b/)?.[0] || 'N/A';
-
-                encontrados.push({
-                  numero: numComparendo,
-                  tipo: /multa/i.test(txt) ? 'Multa' : 'Comparendo',
-                  fechaImposicion: fecha,
-                  placa: placaMatch.replace(/\s+/g, ''),
-                  secretaria: 'Tránsito / Movilidad',
-                  infraccion: 'Registrada',
-                  estado: 'Pendiente',
-                  valorTotal: maxMonto
-                });
-              }
-            }
+          if (matchesMoneda && matchesMoneda.length > 0) {
+            const valores = matchesMoneda.map(m => parseInt(m.replace(/[^0-9]/g, '')) || 0);
+            valorFinal = Math.max(...valores);
           }
-        });
 
-        // Filtrar duplicados por número de comparendo
-        return Array.from(new Set(encontrados.map(a => a.numero)))
-          .map(num => encontrados.find(a => a.numero === num));
+          // Si encontramos un valor válido superior a cero
+          if (valorFinal > 0) {
+            // Buscar número de comparendo (de 10 a 20 dígitos)
+            const numeroComp = textoFila.match(/\b\d{10,20}\b/)?.[0] || `SIMIT-${index + 1}`;
+            // Buscar fecha
+            const fechaComp = textoFila.match(/\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2}/)?.[0] || 'Reciente';
+            // Buscar placa de vehículo
+            const placaComp = textoFila.match(/\b[A-Z]{3}\s*\d{2,3}[A-Z]?\b/)?.[0] || 'N/A';
+
+            resultados.push({
+              numero: numeroComp.trim(),
+              tipo: textoFila.toLowerCase().includes('multa') ? 'Multa' : 'Comparendo',
+              fechaImposicion: fechaComp,
+              placa: placaComp.replace(/\s+/g, ''),
+              secretaria: 'Tránsito / Movilidad',
+              infraccion: 'Infracción de tránsito',
+              estado: 'Pendiente',
+              valorTotal: valorFinal
+            });
+          }
+        }
       });
-    }
+
+      // Eliminar elementos duplicados basados en el número o valor exacto
+      const unicos = [];
+      const mapValores = new Set();
+      
+      resultados.forEach(item => {
+        if (!mapValores.has(item.valorTotal)) {
+          mapValores.add(item.valorTotal);
+          unicos.push(item);
+        }
+      });
+
+      return unicos;
+    });
 
     await browser.close();
 
-    const esPaz = registros.length === 0;
-    console.log(`[LOG] Finalizado. Registros válidos: ${registros.length}`);
+    const esPazYSalvo = registros.length === 0;
+
+    console.log(`[LOG] Consulta finalizada con éxito. Registros reales: ${registros.length}`);
 
     res.json({
       cedula,
       registros,
-      esPazYSalvo: esPaz
+      esPazYSalvo
     });
 
   } catch (error) {
